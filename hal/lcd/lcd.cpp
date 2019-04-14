@@ -16,7 +16,6 @@
 
 #include "../gpio/gpio.h"
 #include "lcd.h"
-//#include "logo.h"
 
 #define LCD_WIDTH			256u
 #define LCD_HIGH			128u
@@ -78,6 +77,31 @@ static const struct command init_command_seq[] = {
 static const size_t init_command_num = sizeof(init_command_seq) / sizeof(struct command);
 //************************************End**************************************
 
+static const uint8_t bit_code[] = {
+	0b00000001,
+	0b00000011,
+	0b00000111,
+	0b00001111,
+	0b00011111,
+	0b00111111,
+	0b01111111,
+	0b11111111,
+};
+
+inline void Lcd::write_buf_byte(int index, Color color, uint8_t d)
+{
+	switch (color) {
+	case E_BLUE:
+		m_frame_buffer[index] &= ~d;
+		break;
+	case E_WHITE:
+		m_frame_buffer[index] |= d;
+		break;
+	default:
+		break;
+	}
+}
+
 Lcd::Lcd(uint32_t i2c, uint8_t addr, uint32_t reset_pin, uint32_t bkl_pin)
 {
 	char buf[10];
@@ -89,8 +113,8 @@ Lcd::Lcd(uint32_t i2c, uint8_t addr, uint32_t reset_pin, uint32_t bkl_pin)
 
 	m_reset_pin->set_direction(Gpio::E_OUT);
 	m_reset_pin->reset(true);
-	// delay 60ms
-	usleep(60000);
+	// delay 600ms
+	usleep(600000);
 	m_reset_pin->set(true);
 
 	m_i2c_addr = addr;
@@ -114,8 +138,7 @@ Lcd::Lcd(uint32_t i2c, uint8_t addr, uint32_t reset_pin, uint32_t bkl_pin)
 	m_frame_mem_ptr[1] = 0x5cu;
 	m_frame_mem_ptr[2] = 0x40u;
 	m_frame_buffer = &m_frame_mem_ptr[3];
-	memset(m_frame_buffer, 0xaau, m_frame_buffer_size);
-	m_frame_buffer[0] = 0x05;
+	memset(m_frame_buffer, 0, m_frame_buffer_size);
 
 	m_backlight_pin = new Gpio(bkl_pin);
 	if (m_reset_pin == NULL) {
@@ -133,13 +156,24 @@ Lcd::~Lcd()
 	}
 
 	if (m_reset_pin) {
+		m_reset_pin->reset(true);
 		delete m_reset_pin;
+	}
+
+	if (m_backlight_pin) {
+		m_backlight_pin->reset(true);
+		delete m_backlight_pin;
 	}
 
 	if (m_frame_mem_ptr) {
 		delete m_frame_mem_ptr;
 	}
-	m_reset_pin->reset(true);
+}
+
+Lcd &Lcd::instance()
+{
+	static Lcd lcd(1, 0x3f, 24, 25);
+	return lcd;
 }
 
 bool Lcd::init()
@@ -151,6 +185,7 @@ bool Lcd::init()
 		if (!ret_val) {
 			printf("init failed at step %u\n", i);
 		}
+		usleep(10000);
 	}
 	return ret_val;
 }
@@ -170,6 +205,220 @@ bool Lcd::sync()
 		printf("set position of y failed\n");
 	}
 	return ret_val;
+}
+
+void Lcd::clear()
+{
+	memset(m_frame_buffer, 0, m_frame_buffer_size);
+}
+
+void Lcd::draw_point(int x, int y, Color color)
+{
+	// out range
+	if ((x < 0) || (x >= (int)LCD_WIDTH)) {
+		return;
+	}
+
+	if ((y < 0) || (y >= (int)LCD_HIGH)) {
+		return;
+	}
+
+	int _y0 = 7 - y % 8, _y1 = y / 8;
+	uint32_t index = _y1 * LCD_WIDTH + x;
+	uint8_t _d = 0x01 << _y0;
+	write_buf_byte(index, color, _d);
+}
+
+void Lcd::draw_v_line(int x, int y0, int y1, Color color)
+{
+	// out range
+	if ((x < 0) || (x >= (int)LCD_WIDTH)) {
+		return;
+	}
+
+	if (y0 < 0) {
+		y0 = 0;
+	} else if (y0 > (int)LCD_HIGH) {
+		y0 = LCD_HIGH;
+	}
+
+	if (y1 < 0) {
+		y1 = 0;
+	} else if (y1 > (int)LCD_HIGH) {
+		y1 = LCD_HIGH;
+	}
+
+	if (y1 < y0) {
+		int t = y0;
+		y0 = y1;
+		y1 = t;
+	}
+
+	if (y1 == y0) {
+		return;
+	}
+
+	int y0_byte = y0 / 8, y0_bit = 7 - y0 % 8;
+	int y1_byte = y1 / 8, y1_bit = 7 - y1 % 8;
+	int index = x + y0_byte * (int)LCD_WIDTH;
+	uint8_t _d = bit_code[y0_bit];
+	if (y1_byte > y0_byte) {
+		write_buf_byte(index, color, _d);
+		_d = 0xffu;
+		for (int i = y0_byte + 1; i < y1_byte; i++) {
+			index = x + i * LCD_WIDTH;
+			write_buf_byte(index, color, _d);
+		}
+		_d = ~bit_code[y1_bit];
+		index = x + y1_byte * (int)LCD_WIDTH;
+		write_buf_byte(index, color, _d);
+	} else {
+		_d &= ~bit_code[y1_bit];
+		write_buf_byte(index, color, _d);
+	}
+}
+
+void Lcd::draw_h_line(int x0, int x1, int y, Color color)
+{
+	// out range
+	if ((y < 0) || (y >= (int)LCD_HIGH)) {
+		return;
+	}
+
+	if (x0 < 0) {
+		x0 = 0;
+	} else if (x0 > (int)LCD_WIDTH) {
+		x0 = LCD_WIDTH;
+	}
+
+	if (x1 < 0) {
+		x1 = 0;
+	} else if (x1 > (int)LCD_WIDTH) {
+		x1 = LCD_WIDTH;
+	}
+
+	if (x1 < x0) {
+		int t = x0;
+		x0 = x1;
+		x1 = t;
+	}
+
+	if (x1 == x0) {
+		return;
+	}
+
+	uint8_t _d = 0x01 << (7 - y % 8);
+	int index;
+	for (int i = x0; i < x1; i++) {
+		index = i + y / 8 * LCD_WIDTH;
+		write_buf_byte(index, color, _d);
+	}
+}
+
+void Lcd::draw_line(int x0, int y0, int x1, int y1, Color color)
+{
+	if (x0 < 0) {
+		x0 = 0;
+	} else if (x0 > (int)LCD_WIDTH) {
+		x0 = LCD_WIDTH;
+	}
+
+	if (x1 < 0) {
+		x1 = 0;
+	} else if (x1 > (int)LCD_WIDTH) {
+		x1 = LCD_WIDTH;
+	}
+
+	if (y0 < 0) {
+		y0 = 0;
+	} else if (y0 > (int)LCD_HIGH) {
+		y0 = LCD_HIGH;
+	}
+
+	if (y1 < 0) {
+		y1 = 0;
+	} else if (y1 > (int)LCD_HIGH) {
+		y1 = LCD_HIGH;
+	}
+
+	if (x1 == x0) {
+		draw_v_line(x0, y0, y1, color);
+		return;
+	}
+
+	if (y1 == y0) {
+		draw_h_line(x0, x1, y0, color);
+		return;
+	}
+
+	int dx, sx;
+	int dy, sy;
+	int err, this_err;
+
+	if (x0 < x1) {
+		dx = x1 - x0;
+		sx = 1;
+	} else {
+		dx = x0 - x1;
+		sx = -1;
+	}
+
+	if (y0 < y1) {
+		dy = y1 - y0;
+		sy = 1;
+	} else {
+		dy = y0 - y1;
+		sy = -1;
+	}
+	err = (dx > dy? dx : -dy) / 2;
+
+	for (;;) {
+		if (x0 == x1 && y0 == y1)
+			break;
+		draw_point(x0, y0, Lcd::E_WHITE);
+		this_err = err;
+		if (this_err > -dx) {
+			err -= dy;
+			x0 += sx;
+		}
+
+		if (this_err < dy) {
+			err += dx;
+			y0 += sy;
+		}
+	}
+}
+
+void Lcd::draw_bitmap_1(int x0, int y0, int w, int h, const char *data, bool inverse)
+{
+
+}
+
+void Lcd::fill_rect(int x0, int y0, int x1, int y1, Color color)
+{
+
+}
+
+void Lcd::flush_ram(int column, int row, size_t total_column, size_t total_row)
+{
+
+}
+
+void Lcd::set_ram(int column, int row, size_t total_column, const uint8_t *src, size_t size)
+{
+	for (int i = 0; i < (int)size; i++) {
+		int _d_column = i % total_column;
+		int _column = column + _d_column;
+		if ((_column >= 0) && (_column < (int)LCD_WIDTH)) {
+			int _index = _column + row * LCD_WIDTH;
+			if ((_index >= 0) && (_index < (int)m_frame_buffer_size)) {
+				m_frame_buffer[_index] = src[i];
+			}
+		}
+		if (_d_column + 1 == (int)total_column) {
+			row++;
+		}
+	}
 }
 
 bool Lcd::send_data(void *data, size_t len)
